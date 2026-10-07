@@ -4,6 +4,8 @@ Run `py evaluate.py` to score the rule-based checks. In Step 5 the same
 score() function grades the AI agent, so the two can be compared directly.
 """
 
+import argparse
+
 import pandas as pd
 
 from checks import DATA_DIR, load_rates, run_checks
@@ -43,8 +45,18 @@ def score(predictions: pd.DataFrame, answer_key: pd.DataFrame) -> dict:
 
 
 def main() -> None:
-    transactions = pd.read_csv(DATA_DIR / "transactions.csv")
+    parser = argparse.ArgumentParser(description="Score reconciliation results against the answer key.")
+    parser.add_argument("--agent", help="path to an agent_predictions CSV from agent.py (default: score the rule-based checks)")
+    args = parser.parse_args()
+
     answer_key = pd.read_csv(DATA_DIR / "answer_key.csv")
+    if args.agent:
+        predictions = pd.read_csv(args.agent)
+        print(f"AI agent ({args.agent}, {len(predictions)} transactions)\n")
+        score(predictions, answer_key)
+        return
+
+    transactions = pd.read_csv(DATA_DIR / "transactions.csv")
     predictions = run_checks(transactions, load_rates())
 
     print("Rule-based checks\n")
