@@ -12,7 +12,7 @@ While processing payments at Allianz I found a recurring FX-rate mismatch patter
 - [x] Rule-based check functions (`checks.py`; `py evaluate.py` scores them: 50/50 caught, 0 false alarms)
 - [x] LLM agent using the checks as tools (`agent.py`)
 - [x] Evaluation against the answer key (`evaluate.py`; results below)
-- [ ] Streamlit review interface
+- [x] Streamlit review interface (`streamlit run review_app.py`)
 
 ## Data
 
