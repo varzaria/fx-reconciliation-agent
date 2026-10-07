@@ -44,6 +44,10 @@ SYSTEM_PROMPT = """You are a reconciliation analyst reviewing cross-currency pay
 
 For the transaction you are given, run the checks you need using the tools provided. The tools look up the transaction's data themselves, so pass only its txn_id. You can call several tools at once.
 
+Some transactions carry a free-text memo. Read it: it can explain a legitimate exception or point to a problem the checks miss.
+- Duplicates are not always exact copies. Use find_similar_payments to look for the same payment entered again under a different date or journal reference; the same supplier invoice paid twice is a duplicate. Flag only the later entry (the higher txn_id); the earliest entry is the original.
+- Company policy: a rate agreed under a Treasury forward contract is valid even if it differs from the market reference rate, as long as the rate used matches the contract rate stated in the memo exactly. Then the transaction is clear, but set needs_human_review to true so someone confirms the contract. If the rate used does not match the stated contract rate, the rate is wrong.
+
 Then decide:
 - status: "clear" if every check passes, otherwise "flagged".
 - error_type: the single most specific problem, or "none". If both the currency check and the FX-rate check fail, the cause is currency_mismatch (the rate came from the wrong currency).
@@ -89,7 +93,8 @@ TOOLS = [
     make_tool("check_currency", "Checks whether the FX rate used actually belongs to a different currency on that date."),
     make_tool("check_fx_rate", "Checks the FX rate used is within 2% of the reference rate for that date and currency."),
     make_tool("check_conversion", "Checks amount x fx_rate equals the recorded EUR amount."),
-    make_tool("check_duplicate", "Checks whether this payment repeats an earlier transaction (same date, currency, amount and journal reference)."),
+    make_tool("check_duplicate", "Checks whether this payment is an exact copy of an earlier transaction (same date, currency, amount and journal reference)."),
+    make_tool("find_similar_payments", "Lists other payments with the same currency and amount within 7 days, with their memos, to spot payments entered twice in a slightly different form."),
 ]
 
 
@@ -104,14 +109,28 @@ class Toolbox:
         "check_conversion": checks.check_conversion,
     }
 
-    def __init__(self, transactions: pd.DataFrame):
+    def __init__(self, transactions: pd.DataFrame, data_dir: Path):
         self.rows = transactions.set_index("txn_id", drop=False)
-        self.rates = checks.load_rates()
+        self.rates = checks.load_rates(data_dir / "fx_rates.csv")
         self.duplicates = checks.find_duplicates(transactions)
+
+    def find_similar_payments(self, txn_id: str) -> dict:
+        txn = self.rows.loc[txn_id]
+        dates = pd.to_datetime(self.rows["date"])
+        similar = self.rows[
+            (self.rows["txn_id"] != txn_id)
+            & (self.rows["currency"] == txn["currency"])
+            & ((self.rows["amount"] - txn["amount"]).abs() <= 0.01)
+            & ((dates - pd.to_datetime(txn["date"])).abs() <= pd.Timedelta(days=7))
+        ]
+        columns = [c for c in ["txn_id", "date", "amount", "journal_ref", "memo"] if c in similar.columns]
+        return {"similar_payments": json.loads(similar[columns].to_json(orient="records"))}
 
     def run(self, name: str, txn_id: str) -> dict:
         if txn_id not in self.rows.index:
             raise KeyError(f"unknown txn_id {txn_id}")
+        if name == "find_similar_payments":
+            return self.find_similar_payments(txn_id)
         if name == "check_duplicate":
             if txn_id in self.duplicates:
                 return checks.result(False, f"repeat of {self.duplicates[txn_id]}")
@@ -170,9 +189,9 @@ def review_transaction(client, model: str, toolbox: Toolbox, txn: pd.Series) -> 
     raise RuntimeError(f"no decision after {MAX_TURNS} turns")
 
 
-def pick_sample(transactions: pd.DataFrame, n: int, seed: int = 7) -> pd.DataFrame:
-    """About half transactions with planted errors, half clean, so a small run tests both."""
-    key = pd.read_csv(checks.DATA_DIR / "answer_key.csv")
+def pick_sample(transactions: pd.DataFrame, data_dir: Path, n: int, seed: int = 7) -> pd.DataFrame:
+    """About half answer-key cases (errors and tricky cases), half clean, so a small run tests both."""
+    key = pd.read_csv(data_dir / "answer_key.csv")
     with_errors = transactions[transactions["txn_id"].isin(key["txn_id"])]
     clean = transactions[~transactions["txn_id"].isin(key["txn_id"])]
     n_err = min(n // 2, len(with_errors))
@@ -186,14 +205,16 @@ def main() -> None:
     parser.add_argument("--sample", type=int, default=10, help="number of transactions to review (default 10)")
     parser.add_argument("--all", action="store_true", help="review all transactions")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"Claude model (default {DEFAULT_MODEL})")
+    parser.add_argument("--data", default="data", help="dataset folder: data (default) or data_messy")
     args = parser.parse_args()
 
     load_dotenv(ROOT / ".env")
     client = anthropic.Anthropic()
 
-    transactions = pd.read_csv(checks.DATA_DIR / "transactions.csv")
-    batch = transactions if args.all else pick_sample(transactions, args.sample)
-    toolbox = Toolbox(transactions)
+    data_dir = ROOT / args.data
+    transactions = pd.read_csv(data_dir / "transactions.csv")
+    batch = transactions if args.all else pick_sample(transactions, data_dir, args.sample)
+    toolbox = Toolbox(transactions, data_dir)
 
     LOG_DIR.mkdir(exist_ok=True)
     RESULTS_DIR.mkdir(exist_ok=True)
@@ -236,7 +257,7 @@ def main() -> None:
         print(f"Estimated cost for all {len(transactions)} transactions: about ${cost / len(batch) * len(transactions):.2f}")
     print(f"Predictions: {out_path.relative_to(ROOT)}")
     print(f"Decision log: {log_path.relative_to(ROOT)}")
-    print(f"Score it with: py evaluate.py --agent {out_path.relative_to(ROOT)}")
+    print(f"Score it with: py evaluate.py --agent {out_path.relative_to(ROOT)} --data {args.data}")
 
 
 if __name__ == "__main__":
