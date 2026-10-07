@@ -1,44 +1,42 @@
 # FX Reconciliation Agent
 
-An LLM agent that checks cross-currency payment transactions against reference FX rates and journal entries, flags discrepancies, explains them, and routes them to a human reviewer.
+An AI agent that checks cross-currency payments, explains every discrepancy in plain English, and sends only the cases that need judgement to a human reviewer.
 
-## Why
+- **120 / 120 test transactions handled correctly**, versus 90% for rule-based checks alone
+- **Human review cut from 100% to 23%** of transactions, with every AI decision logged and explained
+- **Catches what rules miss:** double payments entered under a new date and journal reference, and legitimate contract rates that rules wrongly flag
 
-While processing payments at Allianz I found a recurring FX-rate mismatch pattern that caused rework between teams. This project explores how an AI agent could catch that class of error automatically, while keeping a human in the loop and every decision traceable.
+<!-- Demo: add the recording as docs/demo.gif and uncomment the next line -->
+<!-- ![Review screen demo](docs/demo.gif) -->
 
-## Status
+## The business problem
 
-- [x] Synthetic data generator with planted errors
-- [x] Rule-based check functions (`checks.py`; `py evaluate.py` scores them: 50/50 caught, 0 false alarms)
-- [x] LLM agent using the checks as tools (`agent.py`)
-- [x] Evaluation against the answer key (`evaluate.py`; results below)
-- [x] Streamlit review interface (`streamlit run review_app.py`)
+While processing payments at Allianz, I found a recurring FX-rate mismatch pattern that caused rework between the payments and FX teams. Checks like this are usually done by hand, one transaction at a time.
 
-## Data
+Simple rules can catch exact errors, but real ledgers are messier. Memos explain exceptions, and duplicates are rarely exact copies. This project tests where AI adds value on top of rules, and what it costs.
 
-`py generate_data.py` writes to `data/`:
+## How it works
 
-| File | Contents |
-| --- | --- |
-| `transactions.csv` | 500 transactions to check |
-| `fx_rates.csv` | Reference daily rates (EUR per 1 unit of foreign currency) |
-| `answer_key.csv` | The ~10% of transactions with planted errors, and the error type |
-
-Planted error types: wrong FX rate, currency mismatch, conversion mismatch, missing journal, unbalanced journal, duplicate.
-
-## Setup
-
+```mermaid
+flowchart LR
+    T[Transactions<br/>with memos] --> A[AI agent<br/>Claude Opus 5.5]
+    A -- "calls as tools" --> C[Rule-based checks<br/>FX rate, currency, conversion,<br/>journal, duplicates]
+    C -- "pass / fail + reason" --> A
+    A -- "searches" --> S[Similar payments]
+    A --> L[(Decision log)]
+    A --> D{Needs a person?}
+    D -- "no (77%)" --> OK[Cleared, with<br/>logged explanation]
+    D -- "yes (23%)" --> R[Review screen]
+    R --> H[Approve / Override<br/>audit trail]
 ```
-py -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-copy .env.example .env   # then add your API key
-py generate_data.py
-```
+
+1. **Rules first.** Six plain-Python checks (`checks.py`) catch exact errors: wrong FX rate, wrong currency, conversion mismatch, missing or unbalanced journal, and duplicate entry.
+2. **The AI uses the rules as tools.** For each transaction, the agent runs the checks, reads the memo, and searches for similar payments. It returns a decision, a plain-English explanation, a suggested fix, and whether a human must review it.
+3. **People stay in charge.** Anything flagged or uncertain goes to a review screen where a finance reviewer approves or overrides the AI. Every decision is timestamped.
 
 ## Results
 
-Measured on the messy dataset (`data_messy/`): 120 transactions with free-text memos, including cases that exact rules get wrong. Generate it with `py generate_data.py --messy`.
+Measured on 120 transactions with free-text memos (`data_messy/`), including cases that exact rules get wrong.
 
 | Case | Transactions | Rule-based checks | AI agent (Claude Opus 5.5) | AI agent (Claude Haiku 4.5) |
 | --- | --- | --- | --- | --- |
@@ -53,9 +51,9 @@ Measured on the messy dataset (`data_messy/`): 120 transactions with free-text m
 **Findings**
 
 - **The AI earns its place on the messy cases.** Rules missed every near-duplicate (double payments) and raised a false alarm on every legitimate contract rate. The agent handled all 12 by reading memos and searching for similar payments.
-- **Human review drops from 100% to 23% of transactions.** The Opus agent sent 28 of 120 transactions to a person: every flagged error plus the contract-rate exceptions, which policy says a human must confirm. The other 77% were cleared with a logged, explained decision.
-- **The cheaper model is not "good enough" here.** Haiku costs ~5x less, but it silently cleared one double payment. Its two other misses were still routed to human review. For payments, one silent miss outweighs the saving, so Opus is the recommended model; Haiku could do a first pass on low-value transactions.
-- **On clean, rule-friendly data the rules alone score 500/500.** Don't use AI where rules already work: the agent calls the rules as tools and adds judgement, explanations and suggested fixes on top.
+- **Human review drops from 100% to 23% of transactions.** The Opus agent sent 28 of 120 transactions to a person: every flagged error, plus the contract-rate exceptions, which policy says a human must confirm. The other 77% were cleared with a logged, explained decision.
+- **The cheaper model is not "good enough" here.** Haiku costs about 5x less, but it silently cleared one double payment. Its two other misses were still sent for human review. For payments, one silent miss outweighs the saving, so Opus is the recommended model; Haiku could do a first pass on low-value transactions.
+- **Don't use AI where rules already work.** On the clean, rule-friendly dataset (`data/`, 500 transactions), the rules alone score 500 / 500.
 
 **Estimating savings**
 
@@ -67,10 +65,48 @@ These are scenarios, not measured results. The only measured input is the agent'
 | 1,000 | 38 h | 64 h | 128 h | ~$33 |
 | 5,000 | 192 h | 319 h | 639 h | ~$165 |
 
-Assumes cleared transactions need no further checking; in practice a team would spot-check a sample of them at first, so real savings start lower and grow as trust builds. The first step with any client is to measure their actual volume and time per check.
+This assumes cleared transactions need no further checking. In practice a team would spot-check a sample at first, so real savings start lower and grow as trust builds. The first step with any client is to measure their actual volume and time per check.
 
-**Design choices**
+## Design choices
 
-- Tools take only a transaction ID and look up the numbers themselves, so the model cannot misread or invent figures.
-- Every decision is logged with the checks run and their results (`logs/`), for audit.
-- Company policy (contract-rate exceptions, which entry of a duplicate pair to flag) lives in the system prompt in plain English, where a finance team can read and change it.
+- **The AI can't invent numbers.** Tools take only a transaction ID and look up the figures themselves.
+- **Every decision is auditable.** Each run logs the checks the agent ran, their results, and its final decision (`logs/`). Reviewer actions are saved with timestamps (`reviews/`).
+- **Business policy is readable.** Rules such as "a contract rate is valid only if it matches the memo exactly" live in the agent's instructions in plain English, where a finance team can read and change them.
+- **Measured, not assumed.** Every claim above comes from `evaluate.py`, which scores any run against an answer key.
+
+## Limitations
+
+- The data is synthetic. Real ledgers would need connecting to an ERP or bank feed, and the tricky cases here were designed by the same person who wrote the agent's policy. A real deployment should be measured on the client's own historical data.
+- Transactions are reviewed one at a time. Large volumes would need parallel processing or the Batch API, which halves the cost.
+
+## Run it yourself
+
+Requires Python 3.10+ and an [Anthropic API key](https://console.anthropic.com).
+
+```
+py -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+copy .env.example .env          # then add your API key
+```
+
+| Command | What it does |
+| --- | --- |
+| `py generate_data.py` / `py generate_data.py --messy` | Create the clean (`data/`) or messy (`data_messy/`) dataset |
+| `py evaluate.py --data data_messy` | Score the rule-based checks (free, no API calls) |
+| `py agent.py --data data_messy` | Run the AI agent on a 10-transaction sample (about $0.30) |
+| `py agent.py --data data_messy --all` | Run on all 120 messy transactions (about $4) |
+| `py evaluate.py --agent results\<file>.csv --data data_messy` | Score an agent run |
+| `streamlit run review_app.py` | Open the review screen |
+
+## Project structure
+
+| File | Purpose |
+| --- | --- |
+| `generate_data.py` | Builds synthetic transactions with planted errors and an answer key |
+| `checks.py` | Rule-based checks; also the agent's tools |
+| `agent.py` | The AI agent: tool-calling loop, structured decisions, logging, cost tracking |
+| `evaluate.py` | Scores rules or an agent run against the answer key |
+| `review_app.py` | Streamlit review screen: approve / override with an audit trail |
+
+**Built with:** Python, pandas, the Anthropic API (Claude Opus 5.5 and Haiku 4.5, tool use and structured outputs), Streamlit.
