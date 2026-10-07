@@ -57,6 +57,18 @@ Measured on the messy dataset (`data_messy/`): 120 transactions with free-text m
 - **The cheaper model is not "good enough" here.** Haiku costs ~5x less, but it silently cleared one double payment. Its two other misses were still routed to human review. For payments, one silent miss outweighs the saving, so Opus is the recommended model; Haiku could do a first pass on low-value transactions.
 - **On clean, rule-friendly data the rules alone score 500/500.** Don't use AI where rules already work: the agent calls the rules as tools and adds judgement, explanations and suggested fixes on top.
 
+**Estimating savings**
+
+These are scenarios, not measured results. The only measured input is the agent's review rate: 92 of 120 transactions (77%) were cleared without needing a person. Hours saved per week = weekly volume × minutes per manual check × 77% ÷ 60.
+
+| Transactions per week | 3 min per check | 5 min per check | 10 min per check | AI cost per week (Opus) |
+| --- | --- | --- | --- | --- |
+| 200 | 8 h | 13 h | 26 h | ~$7 |
+| 1,000 | 38 h | 64 h | 128 h | ~$33 |
+| 5,000 | 192 h | 319 h | 639 h | ~$165 |
+
+Assumes cleared transactions need no further checking; in practice a team would spot-check a sample of them at first, so real savings start lower and grow as trust builds. The first step with any client is to measure their actual volume and time per check.
+
 **Design choices**
 
 - Tools take only a transaction ID and look up the numbers themselves, so the model cannot misread or invent figures.
