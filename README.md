@@ -9,7 +9,7 @@ While processing payments at Allianz I found a recurring FX-rate mismatch patter
 ## Status
 
 - [x] Synthetic data generator with planted errors
-- [ ] Rule-based check functions
+- [x] Rule-based check functions (`checks.py`; `py evaluate.py` scores them: 50/50 caught, 0 false alarms)
 - [ ] LLM agent using the checks as tools
 - [ ] Evaluation against the answer key
 - [ ] Streamlit review interface
