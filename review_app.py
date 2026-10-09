@@ -141,6 +141,25 @@ tab_queue, tab_cleared, tab_history = st.tabs([
 
 QUEUE_COLUMNS = [2.2, 2.2, 2.2, 1.2, 2.8, 1.3, 1.3]  # transaction, amount, AI verdict, confidence, note, approve, override
 
+ERROR_REASONS = {
+    "duplicate": "Possible double payment: this looks like a repeat of an earlier payment.",
+    "wrong_fx_rate": "The FX rate used is more than 2% away from that day's reference rate.",
+    "currency_mismatch": "The rate used belongs to a different currency.",
+    "conversion_mismatch": "The EUR amount doesn't equal the amount × the rate used.",
+    "missing_journal": "No journal reference was recorded for this payment.",
+    "unbalanced_journal": "The journal's debit and credit don't match.",
+}
+
+
+def why_here(pred, txn) -> str:
+    """One line telling the reviewer why this transaction needs a person."""
+    if pred["flagged"]:
+        return "AI found an error. " + ERROR_REASONS.get(pred["error_type"], "See the AI's explanation.")
+    if "memo" in txn and is_text(txn["memo"]) and "forward contract" in txn["memo"].lower():
+        return ("Cleared by the AI, but contract rates must be confirmed against the Treasury register before payment: "
+                "the AI can read the memo but can't verify that the contract exists.")
+    return f"Cleared by the AI, but it asked for a person to confirm (confidence: {pred['confidence']})."
+
 
 def show_details(pred, txn) -> None:
     """Everything behind the AI's verdict: the transaction, its explanation and the checks it ran."""
@@ -209,6 +228,7 @@ with tab_queue:
                         st.rerun()
                     else:  # overriding a control needs a recorded reason
                         st.warning("Add a note explaining why the AI is wrong. Overrides need a reason for the audit trail.")
+            st.caption(f"ℹ️ **Why it's here:** {why_here(pred, txn)}")
             with st.expander("Details: AI explanation and checks"):
                 show_details(pred, txn)
 
