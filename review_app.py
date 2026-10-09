@@ -114,20 +114,26 @@ reviews = load_reviews(stamp)
 latest_review = reviews.drop_duplicates("txn_id", keep="last").set_index("txn_id")
 
 model = next(iter(log.values()), {}).get("model", "unknown model")
-needs_review = predictions[predictions["needs_human_review"]]
+predictions["amount_eur"] = predictions["txn_id"].map(transactions["amount_eur"])
+# Priority order for reviewers: actual errors first, largest first; then cases the AI cleared but wants confirmed.
+needs_review = (predictions[predictions["needs_human_review"]]
+                .sort_values(["flagged", "amount_eur"], ascending=[False, False]))
 auto_cleared = predictions[~predictions["needs_human_review"]]
 reviewed = needs_review["txn_id"].isin(latest_review.index)
+value_flagged = predictions.loc[predictions["flagged"], "amount_eur"].sum()
 
 # --- Header and summary ------------------------------------------------------------
 
 st.subheader("Payment Reconciliation Review")
 st.caption(f"Agent run {stamp} · {model} · {dataset}/")
 
-m = st.columns(4)
+m = st.columns(5)
 m[0].metric("Transactions", len(predictions))
 m[1].metric("Auto-cleared by AI", len(auto_cleared), f"{len(auto_cleared) / len(predictions):.0%} of total", delta_color="off")
 m[2].metric("Sent for review", len(needs_review))
-m[3].metric("Reviewed", f"{reviewed.sum()} / {len(needs_review)}")
+m[3].metric("Payments flagged", f"€{value_flagged:,.0f}", f"{int(predictions['flagged'].sum())} errors found", delta_color="off",
+            help="Total EUR value of the transactions the AI found errors in")
+m[4].metric("Reviewed", f"{reviewed.sum()} / {len(needs_review)}")
 st.progress(reviewed.mean() if len(needs_review) else 1.0)
 
 tab_queue, tab_cleared, tab_history = st.tabs([
@@ -198,8 +204,11 @@ with tab_queue:
                     save_review(stamp, txn_id, "approved", note, reviewer)
                     st.rerun()
                 if c[6].button("Override", key=f"override-{txn_id}", use_container_width=True, help="The AI got this wrong"):
-                    save_review(stamp, txn_id, "overridden", note, reviewer)
-                    st.rerun()
+                    if note.strip():
+                        save_review(stamp, txn_id, "overridden", note, reviewer)
+                        st.rerun()
+                    else:  # overriding a control needs a recorded reason
+                        st.warning("Add a note explaining why the AI is wrong. Overrides need a reason for the audit trail.")
             with st.expander("Details: AI explanation and checks"):
                 show_details(pred, txn)
 
@@ -207,13 +216,17 @@ with tab_queue:
 
 with tab_cleared:
     st.caption("These transactions passed every check and were cleared without anyone looking at them. "
-               "Spot-check a sample, especially while the system is new.")
-    cleared = auto_cleared.merge(transactions.reset_index()[["txn_id", "date", "amount", "currency"]], on="txn_id")
-    st.dataframe(
-        cleared.assign(amount=lambda d: [f"{a:,.2f} {c}" for a, c in zip(d["amount"], d["currency"])])
-        [["txn_id", "date", "amount", "reason"]].rename(columns={"reason": "AI explanation"}),
-        hide_index=True, use_container_width=True,
-    )
+               "Open a few each day to confirm the AI got them right. 🔎 = today's suggested spot-check sample.")
+    if not auto_cleared.empty:
+        # A small sample that changes daily, shown first, so it's clear where to start.
+        sample_ids = set(auto_cleared.sample(min(3, len(auto_cleared)), random_state=datetime.now().toordinal())["txn_id"])
+        ordered = auto_cleared.assign(spot=auto_cleared["txn_id"].isin(sample_ids)).sort_values("spot", ascending=False, kind="stable")
+        for _, pred in ordered.iterrows():
+            txn = transactions.loc[pred["txn_id"]]
+            label = (f"{'🔎 ' if pred['spot'] else ''}{pred['txn_id']} · {txn['date']} · "
+                     f"{txn['amount']:,.2f} {txn['currency']} (EUR {txn['amount_eur']:,.2f})")
+            with st.expander(label):
+                show_details(pred, txn)
 
 # --- Review history --------------------------------------------------------------------
 
