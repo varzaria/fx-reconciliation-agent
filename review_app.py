@@ -2,9 +2,10 @@
 
 Run with:  streamlit run review_app.py
 
-Shows the transactions the agent sent for human review, with its explanation,
-suggested fix and the checks it ran. A reviewer approves or overrides each one;
-decisions are saved with a timestamp to reviews/ as an audit trail.
+Shows the transactions the agent sent for human review, one row each, with the
+AI's verdict. Details (explanation, suggested fix, the checks the agent ran)
+open underneath. A reviewer approves or overrides each one; decisions are saved
+with who, when and an optional note to reviews/ as an audit trail.
 """
 
 import json
@@ -18,9 +19,17 @@ ROOT = Path(__file__).parent
 RESULTS_DIR = ROOT / "results"
 LOG_DIR = ROOT / "logs"
 REVIEW_DIR = ROOT / "reviews"
-REVIEW_COLUMNS = ["txn_id", "action", "note", "reviewed_at"]
+REVIEW_COLUMNS = ["txn_id", "action", "note", "reviewed_at", "reviewed_by"]
 
-st.set_page_config(page_title="Payment Reconciliation Review", layout="wide")
+st.set_page_config(page_title="Payment Reconciliation Review", page_icon="💱", layout="wide")
+st.markdown("""<style>
+.block-container {padding-top: 2rem;}
+/* Approve buttons green, Override buttons red (Streamlit tags each button's container with its key) */
+[class*="st-key-approve-"] button {background-color: #1e9e55; border-color: #1e9e55; color: white;}
+[class*="st-key-approve-"] button:hover {background-color: #178244; border-color: #178244; color: white;}
+[class*="st-key-override-"] button {background-color: #d64545; border-color: #d64545; color: white;}
+[class*="st-key-override-"] button:hover {background-color: #b53434; border-color: #b53434; color: white;}
+</style>""", unsafe_allow_html=True)
 
 
 def stamp_of(path: Path) -> str:
@@ -52,29 +61,45 @@ def load_reviews(stamp: str) -> pd.DataFrame:
     path = REVIEW_DIR / f"reviews-{stamp}.csv"
     if not path.exists():
         return pd.DataFrame(columns=REVIEW_COLUMNS)
-    return pd.read_csv(path, keep_default_na=False)
+    df = pd.read_csv(path, keep_default_na=False)
+    return df.reindex(columns=REVIEW_COLUMNS, fill_value="")  # older review files have no reviewed_by
 
 
-def save_review(stamp: str, txn_id: str, action: str, note: str) -> None:
+def save_review(stamp: str, txn_id: str, action: str, note: str, reviewer: str) -> None:
     REVIEW_DIR.mkdir(exist_ok=True)
     path = REVIEW_DIR / f"reviews-{stamp}.csv"
+    existing = load_reviews(stamp)
     row = pd.DataFrame([{"txn_id": txn_id, "action": action, "note": note,
-                         "reviewed_at": datetime.now().isoformat(timespec="seconds")}])
-    row.to_csv(path, mode="a", header=not path.exists(), index=False)
+                         "reviewed_at": datetime.now().isoformat(timespec="seconds"), "reviewed_by": reviewer}])
+    pd.concat([existing, row]).to_csv(path, index=False)
 
 
-# --- Choose a run --------------------------------------------------------------
+def is_text(value) -> bool:
+    return isinstance(value, str) and value.strip() != ""
+
+
+# --- Sidebar ---------------------------------------------------------------------
 
 runs = sorted(RESULTS_DIR.glob("agent_predictions-*.csv"), reverse=True)
 if not runs:
     st.error("No agent runs found. Run `py agent.py` first.")
     st.stop()
 
+
+def default_run(paths: list[Path]) -> int:
+    """Open on the largest run made with Opus (the recommended model), else the newest run."""
+    def size_if_opus(path: Path) -> int:
+        label = run_label(path)
+        return int(label.split(" · ")[-1].split()[0]) if "opus" in label else -1
+    best = max(range(len(paths)), key=lambda i: (size_if_opus(paths[i]), -i))
+    return best if size_if_opus(paths[best]) >= 0 else 0
+
 with st.sidebar:
-    st.header("Run")
-    run_path = st.selectbox("Agent run", runs, format_func=run_label)
-    dataset = st.selectbox("Dataset", ["data_messy", "data"],
-                           help="The dataset the agent run was made on.")
+    st.header("💱 Payment Review")
+    st.caption("AI reconciliation agent · human review")
+    reviewer = st.text_input("Your name", value="Alexandru Varzari", help="Recorded with every decision.")
+    run_path = st.selectbox("Agent run", runs, index=default_run(runs), format_func=run_label)
+    dataset = st.selectbox("Dataset", ["data_messy", "data"], help="The dataset the agent run was made on.")
     queue_filter = st.radio("Review queue shows", ["Pending", "All"], horizontal=True)
 
 stamp = stamp_of(run_path)
@@ -93,95 +118,110 @@ needs_review = predictions[predictions["needs_human_review"]]
 auto_cleared = predictions[~predictions["needs_human_review"]]
 reviewed = needs_review["txn_id"].isin(latest_review.index)
 
-# --- Header and summary -----------------------------------------------------
+# --- Header and summary ------------------------------------------------------------
 
-st.title("Payment Reconciliation Review")
+st.subheader("Payment Reconciliation Review")
 st.caption(f"Agent run {stamp} · {model} · {dataset}/")
 
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Transactions", len(predictions))
-c2.metric("Auto-cleared by AI", len(auto_cleared), f"{len(auto_cleared) / len(predictions):.0%} of total", delta_color="off")
-c3.metric("Sent for review", len(needs_review))
-c4.metric("Reviewed", f"{reviewed.sum()} / {len(needs_review)}")
+m = st.columns(4)
+m[0].metric("Transactions", len(predictions))
+m[1].metric("Auto-cleared by AI", len(auto_cleared), f"{len(auto_cleared) / len(predictions):.0%} of total", delta_color="off")
+m[2].metric("Sent for review", len(needs_review))
+m[3].metric("Reviewed", f"{reviewed.sum()} / {len(needs_review)}")
 st.progress(reviewed.mean() if len(needs_review) else 1.0)
 
-tab_queue, tab_cleared, tab_history = st.tabs(["Review queue", "Auto-cleared", "Review history"])
+tab_queue, tab_cleared, tab_history = st.tabs([
+    f"Review queue ({int((~reviewed).sum())})", f"Auto-cleared ({len(auto_cleared)})", f"Review history ({len(reviews)})"])
 
-# --- Review queue -----------------------------------------------------------
+QUEUE_COLUMNS = [2.2, 2.2, 2.2, 1.2, 2.8, 1.3, 1.3]  # transaction, amount, AI verdict, confidence, note, approve, override
+
+
+def show_details(pred, txn) -> None:
+    """Everything behind the AI's verdict: the transaction, its explanation and the checks it ran."""
+    left, right = st.columns([2, 3])
+    with left:
+        journal = txn["journal_ref"] if is_text(txn["journal_ref"]) else "(none)"
+        st.markdown(f"**Transaction**  \n{txn['date']} · {txn['amount']:,.2f} {txn['currency']} @ {txn['fx_rate']}  \n"
+                    f"EUR {txn['amount_eur']:,.2f} · journal {journal}  \n"
+                    f"Debit {txn['journal_debit_eur']:,.2f} / credit {txn['journal_credit_eur']:,.2f}")
+        if "memo" in txn and is_text(txn["memo"]):
+            st.caption(f"Memo: {txn['memo']}")
+    with right:
+        st.markdown(f"**AI assessment**  \n{pred['reason']}")
+        if is_text(pred["suggested_fix"]) and pred["suggested_fix"].lower() != "none":
+            st.markdown(f"**Suggested fix:** {pred['suggested_fix']}")
+    entry = log.get(pred["txn_id"])
+    if entry:
+        st.markdown(f"**Checks run by the agent ({len(entry['tool_calls'])})**")
+        for call in entry["tool_calls"]:
+            result = call["result"]
+            if "passed" in result:
+                st.caption(f"{'✅' if result['passed'] else '❌'} `{call['tool']}` {result['reason']}")
+            elif "similar_payments" in result:
+                st.caption(f"🔎 `{call['tool']}`: {len(result['similar_payments'])} similar payment(s)")
+                for p in result["similar_payments"]:
+                    st.caption(f"    {p.get('txn_id')} · {p.get('date')} · {p.get('journal_ref')} · {p.get('memo', '')}")
+            else:
+                st.caption(f"⚠️ `{call['tool']}` {result}")
+
+
+# --- Review queue --------------------------------------------------------------------
 
 with tab_queue:
     queue = needs_review if queue_filter == "All" else needs_review[~reviewed]
     if queue.empty:
         st.success("All transactions sent for review have been reviewed.")
+    else:
+        header = st.columns(QUEUE_COLUMNS)
+        for col, label in zip(header, ["Transaction", "Amount", "AI verdict", "Confidence", "Note", "", ""]):
+            col.caption(label)
 
     for _, pred in queue.iterrows():
         txn_id = pred["txn_id"]
         txn = transactions.loc[txn_id]
         flagged = bool(pred["flagged"])
-        label = pred["error_type"] if flagged and isinstance(pred["error_type"], str) else "clear (confirm)"
-        colour = "red" if flagged else "orange"
-
+        verdict = (f":red-badge[{pred['error_type'].replace('_', ' ')}]" if flagged and is_text(pred["error_type"])
+                   else ":orange-badge[clear: confirm]")
         with st.container(border=True):
-            st.markdown(f"#### {txn_id} &nbsp; :{colour}-background[{label}] &nbsp; "
-                        f":gray[confidence: {pred['confidence']}]")
+            c = st.columns(QUEUE_COLUMNS, vertical_alignment="center")
+            c[0].markdown(f"**{txn_id}**  \n:gray[{txn['date']}]")
+            c[1].markdown(f"**{txn['amount']:,.2f} {txn['currency']}**  \n:gray[EUR {txn['amount_eur']:,.2f}]")
+            c[2].markdown(verdict, help=pred["reason"])
+            c[3].markdown(f":gray[{pred['confidence']}]")
             if txn_id in latest_review.index:
                 r = latest_review.loc[txn_id]
-                st.info(f"**{r['action'].capitalize()}** at {r['reviewed_at']}" + (f" · {r['note']}" if r["note"] else ""))
+                done = f"**{r['action'].capitalize()}**" + (f" by {r['reviewed_by']}" if r["reviewed_by"] else "")
+                c[4].markdown(done + (f"  \n:gray[{r['note']}]" if r["note"] else ""))
+            else:
+                note = c[4].text_input("Note", key=f"note-{txn_id}", placeholder="Note (optional)", label_visibility="collapsed")
+                if c[5].button("Approve", key=f"approve-{txn_id}", use_container_width=True, help="Accept the AI's verdict"):
+                    save_review(stamp, txn_id, "approved", note, reviewer)
+                    st.rerun()
+                if c[6].button("Override", key=f"override-{txn_id}", use_container_width=True, help="The AI got this wrong"):
+                    save_review(stamp, txn_id, "overridden", note, reviewer)
+                    st.rerun()
+            with st.expander("Details: AI explanation and checks"):
+                show_details(pred, txn)
 
-            left, right = st.columns([2, 3])
-            with left:
-                st.markdown("**Transaction**")
-                st.markdown(
-                    f"{txn['date']} · {txn['amount']:,.2f} {txn['currency']} @ {txn['fx_rate']}  \n"
-                    f"EUR {txn['amount_eur']:,.2f} · journal {txn['journal_ref'] if isinstance(txn['journal_ref'], str) else '(none)'}  \n"
-                    f"Debit {txn['journal_debit_eur']:,.2f} / credit {txn['journal_credit_eur']:,.2f}"
-                )
-                if "memo" in txn and isinstance(txn["memo"], str):
-                    st.caption(f"Memo: {txn['memo']}")
-            with right:
-                st.markdown("**AI assessment**")
-                st.write(pred["reason"])
-                if isinstance(pred["suggested_fix"], str) and pred["suggested_fix"].lower() != "none":
-                    st.markdown(f"**Suggested fix:** {pred['suggested_fix']}")
-
-            entry = log.get(txn_id)
-            if entry:
-                with st.expander(f"Checks run by the agent ({len(entry['tool_calls'])})"):
-                    for call in entry["tool_calls"]:
-                        result = call["result"]
-                        if "passed" in result:
-                            icon = "✅" if result["passed"] else "❌"
-                            st.markdown(f"{icon} `{call['tool']}` {result['reason']}")
-                        elif "similar_payments" in result:
-                            st.markdown(f"🔎 `{call['tool']}`: {len(result['similar_payments'])} similar payment(s)")
-                            for p in result["similar_payments"]:
-                                st.caption(f"{p.get('txn_id')} · {p.get('date')} · {p.get('journal_ref')} · {p.get('memo', '')}")
-                        else:
-                            st.markdown(f"⚠️ `{call['tool']}` {result}")
-
-            note = st.text_input("Reviewer note (optional)", key=f"note-{txn_id}")
-            b1, b2, _ = st.columns([1, 1, 4])
-            if b1.button("Approve AI decision", key=f"approve-{txn_id}", type="primary"):
-                save_review(stamp, txn_id, "approved", note)
-                st.rerun()
-            if b2.button("Override", key=f"override-{txn_id}"):
-                save_review(stamp, txn_id, "overridden", note)
-                st.rerun()
-
-# --- Auto-cleared -------------------------------------------------------------
+# --- Auto-cleared ----------------------------------------------------------------------
 
 with tab_cleared:
-    st.write(f"{len(auto_cleared)} transactions were cleared by the AI without needing review. "
-             "Spot-check a sample, especially while the system is new.")
-    st.dataframe(auto_cleared[["txn_id", "reason"]].rename(columns={"reason": "AI explanation"}),
-                 hide_index=True, use_container_width=True)
+    st.caption("These transactions passed every check and were cleared without anyone looking at them. "
+               "Spot-check a sample, especially while the system is new.")
+    cleared = auto_cleared.merge(transactions.reset_index()[["txn_id", "date", "amount", "currency"]], on="txn_id")
+    st.dataframe(
+        cleared.assign(amount=lambda d: [f"{a:,.2f} {c}" for a, c in zip(d["amount"], d["currency"])])
+        [["txn_id", "date", "amount", "reason"]].rename(columns={"reason": "AI explanation"}),
+        hide_index=True, use_container_width=True,
+    )
 
-# --- Review history -----------------------------------------------------------
+# --- Review history --------------------------------------------------------------------
 
 with tab_history:
     if reviews.empty:
-        st.write("No reviews yet.")
+        st.caption("No reviews yet.")
     else:
-        st.dataframe(reviews.iloc[::-1], hide_index=True, use_container_width=True)
+        st.dataframe(reviews.iloc[::-1][["reviewed_at", "action", "reviewed_by", "txn_id", "note"]],
+                     hide_index=True, use_container_width=True)
         st.download_button("Download review log (CSV)", reviews.to_csv(index=False),
                            file_name=f"reviews-{stamp}.csv", mime="text/csv")
