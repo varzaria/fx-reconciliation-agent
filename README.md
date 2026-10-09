@@ -79,6 +79,20 @@ This assumes cleared transactions need no further checking. In practice a team w
 - The data is synthetic. Real ledgers would need connecting to an ERP or bank feed, and the tricky cases here were designed by the same person who wrote the agent's policy. A real deployment should be measured on the client's own historical data.
 - Transactions are reviewed one at a time. Large volumes would need parallel processing or the Batch API, which halves the cost.
 
+## Risk and compliance
+
+*An initial assessment of what deploying this in a regulated finance team would involve. Not legal advice.*
+
+| Area | What applies | How the design handles it |
+| --- | --- | --- |
+| **EU AI Act: risk level** | Likely **minimal risk**: an internal control tool that checks payments between businesses. It doesn't assess people's creditworthiness, insurance or employment, which the Act lists as high-risk uses. | The agent only checks and explains. It never pays, blocks or changes a transaction itself. |
+| **EU AI Act: AI literacy (Article 4)** | Organisations using AI must make sure their staff understand it well enough to use it properly (applies since February 2025). | Every decision comes with a plain-English explanation and the list of checks run, so reviewers can judge it rather than just accept it. |
+| **Human oversight** | Mistakes cost money, so a person must catch them. | Everything flagged or uncertain goes to a reviewer (23% of transactions in testing); approvals and overrides are timestamped. |
+| **GDPR** | Payment data can contain personal data, such as sole traders' names. Sending it to an AI provider makes the provider a data processor. | The model receives only transaction IDs and looks figures up through the tools. In production: send the minimum fields, sign the provider's data processing terms, and check its data retention period and where data is processed. |
+| **Audit trail** | Auditors and regulators expect every control decision to be traceable. | Every AI decision is logged with the checks it ran and their results (`logs/`); reviewer actions are logged separately (`reviews/`). |
+| **Third-party risk (DORA)** | For banks and insurers, an AI provider is an ICT third-party service provider under the Digital Operational Resilience Act (applies since January 2025), so outages must be planned for. | The rule-based checks in `checks.py` run without the AI, so reconciliation can fall back to rules only. |
+| **Model choice** | A cheaper model silently approved a double payment in testing. | Model choice is treated as a risk decision, not just a cost decision, and the reasoning is documented in the results. |
+
 ## Run it yourself
 
 Requires Python 3.10+ and an [Anthropic API key](https://console.anthropic.com).
