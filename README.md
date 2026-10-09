@@ -6,8 +6,9 @@ An AI agent that checks cross-currency payments, explains every discrepancy in p
 - **Human review cut from 100% to 23%** of transactions, with every AI decision logged and explained
 - **Catches what rules miss:** double payments entered under a new date and journal reference, and legitimate contract rates that rules wrongly flag
 
-<!-- Demo: add the recording as docs/demo.gif and uncomment the next line -->
-<!-- ![Review screen demo](docs/demo.gif) -->
+### ▶ Watch the demo (2 minutes)
+
+[![Demo video: the agent reviewing payments and the human review screen](https://img.youtube.com/vi/hOuaMJz5qqs/hqdefault.jpg)](https://youtu.be/hOuaMJz5qqs)
 
 ## The business problem
 
